@@ -60,6 +60,9 @@ class ActorCriticDH(nn.Module):
         # lh_output_dim is cnn output
         # 3 is state estimator output
         mlp_input_dim_a = num_short_obs + lh_output_dim + 3
+        self.rnn_hidden_dim = 128
+        self.lstm = nn.LSTM(mlp_input_dim_a, self.rnn_hidden_dim, batch_first=True)
+        mlp_input_dim_a = self.rnn_hidden_dim
         # num_privileged_obs = int(c_frame_stack * single_num_privileged_obs), 3 history
         mlp_input_dim_c = num_critic_obs
 
@@ -96,6 +99,8 @@ class ActorCriticDH(nn.Module):
         self.distribution = None
         # disable args validation for speedup
         Normal.set_default_validate_args = False
+        self.hx = None
+        self.cx = None
         
         #define long_history CNN
         long_history_layers = []
@@ -140,7 +145,15 @@ class ActorCriticDH(nn.Module):
          enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))]
 
     def reset(self, dones=None):
-        pass
+        if self.hx is None:
+            return
+        if dones is None:
+            self.hx = None
+            self.cx = None
+        else:
+            done_mask = dones.view(1, -1, 1)
+            self.hx = self.hx * (~done_mask)
+            self.cx = self.cx * (~done_mask)
 
     def forward(self):
         raise NotImplementedError
@@ -166,7 +179,14 @@ class ActorCriticDH(nn.Module):
         es_vel = self.state_estimator(short_history)
         compressed_long_history = self.long_history(observations.view(-1, self.in_channels, self.num_proprio_obs))
         actor_obs = torch.cat((short_history, es_vel, compressed_long_history),dim=-1)
-        self.update_distribution(actor_obs)
+        actor_obs_seq = actor_obs.unsqueeze(1)
+        batch = actor_obs_seq.size(0)
+        if self.hx is None or self.hx.size(1) != batch:
+            self.hx = torch.zeros(1, batch, self.rnn_hidden_dim, device=actor_obs.device)
+            self.cx = torch.zeros(1, batch, self.rnn_hidden_dim, device=actor_obs.device)
+        lstm_out, (self.hx, self.cx) = self.lstm(actor_obs_seq, (self.hx, self.cx))
+        actor_feat = lstm_out.squeeze(1)
+        self.update_distribution(actor_feat)
         return self.distribution.sample()
     
     def get_actions_log_prob(self, actions):
@@ -177,7 +197,14 @@ class ActorCriticDH(nn.Module):
         es_vel = self.state_estimator(short_history)
         compressed_long_history = self.long_history(observations.view(-1, self.in_channels, self.num_proprio_obs))
         actor_obs = torch.cat((short_history, es_vel, compressed_long_history),dim=-1)
-        actions_mean = self.actor(actor_obs)
+        actor_obs_seq = actor_obs.unsqueeze(1)
+        batch = actor_obs_seq.size(0)
+        if self.hx is None or self.hx.size(1) != batch:
+            self.hx = torch.zeros(1, batch, self.rnn_hidden_dim, device=actor_obs.device)
+            self.cx = torch.zeros(1, batch, self.rnn_hidden_dim, device=actor_obs.device)
+        lstm_out, (self.hx, self.cx) = self.lstm(actor_obs_seq, (self.hx, self.cx))
+        actor_feat = lstm_out.squeeze(1)
+        actions_mean = self.actor(actor_feat)
         return actions_mean
 
     def evaluate(self, critic_observations, **kwargs):
