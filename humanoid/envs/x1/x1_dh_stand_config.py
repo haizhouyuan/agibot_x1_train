@@ -185,6 +185,10 @@ class X1DHStandCfg(LeggedRobotCfg):
         push_duration = [0, 0.05, 0.1, 0.15, 0.2, 0.25] # increase push duration during training
         max_push_vel_xy = 0.2
         max_push_ang_vel = 0.2
+        add_ext_force = True
+        ext_force_max_xy = 300
+        ext_force_max_z = 200
+        ext_force_interval_s = 2
 
         randomize_base_mass = True
         added_mass_range = [-3, 3] # base mass rand range, base mass is all fix link sum mass
@@ -337,6 +341,10 @@ class X1DHStandCfg(LeggedRobotCfg):
             vel_mismatch_exp = 0.5  # lin_z; ang x,y
             low_speed = 0.2
             track_vel_hard = 0.5
+            # gait phase
+            cycle_reward = 0.5
+            residual_ang_mom = -0.5
+            symmetry_reward = 0.2
             # base pos
             default_joint_pos = 1.0
             orientation = 1.
