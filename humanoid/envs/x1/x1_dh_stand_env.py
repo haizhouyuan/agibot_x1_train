@@ -555,6 +555,10 @@ class X1DHStandEnv(LeggedRobot):
         for i in range(self.critic_history.maxlen):
             self.critic_history[i][env_ids] *= 0
         
+        # v1.1: Reset cycle consistency buffers
+        self.last_cycle_dof_pos[env_ids] = 0
+        self.cycle_completion_mask[env_ids] = False
+        
     
     def _init_buffers(self):
         """ Initialize torch tensors which will contain simulation states and processed quantities
@@ -564,6 +568,10 @@ class X1DHStandEnv(LeggedRobot):
         self.phase_length_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long)
         self.gait_start = torch.randint(0, 2, (self.num_envs,)).to(self.device)*0.5
+        
+        # v1.1: Add cycle consistency tracking buffers
+        self.last_cycle_dof_pos = torch.zeros(self.num_envs, self.num_dof, device=self.device, dtype=torch.float)
+        self.cycle_completion_mask = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
 
 # ================================================ Rewards ================================================== #
     def _reward_ref_joint_pos(self):
@@ -898,3 +906,42 @@ class X1DHStandEnv(LeggedRobot):
     def _reward_dof_torque_limits(self):
         # penalize torques too close to the limit
         return torch.sum((torch.abs(self.torques) - self.torque_limits*self.cfg.rewards.soft_torque_limit).clip(min=0.), dim=1)
+    
+    def _reward_cycle_consistency(self):
+        """
+        v1.1: Periodic gait reward - encourages consistent cyclic motion.
+        Rewards the robot for returning to similar joint configurations at equivalent points in successive gait cycles.
+        """
+        # Get current phase
+        phase = self._get_phase()
+        
+        # Detect cycle completion (phase wraps around from ~1.0 to ~0.0)
+        cycle_time = self.cfg.rewards.cycle_time
+        dt = self.dt
+        current_cycle_phase = (self.phase_length_buf * dt / cycle_time) % 1.0
+        
+        # Detect when a new cycle starts (phase crosses 0)
+        cycle_just_completed = (current_cycle_phase < 0.1) & (current_cycle_phase > 0.0)
+        
+        # Initialize last_cycle_dof_pos if this is the first cycle
+        first_cycle = self.last_cycle_dof_pos.sum(dim=1) == 0
+        
+        # Calculate cycle consistency reward
+        if cycle_just_completed.any():
+            # Compute joint position difference between current and last cycle
+            dof_pos_diff = torch.norm(self.dof_pos - self.last_cycle_dof_pos, dim=1)
+            
+            # Reward for small differences (consistent cycles)
+            cycle_consistency_reward = torch.exp(-dof_pos_diff * 10.0)
+            
+            # Only apply reward to environments that just completed a cycle and not in first cycle
+            reward_mask = cycle_just_completed & ~first_cycle
+            cycle_consistency_reward = torch.where(reward_mask, cycle_consistency_reward, torch.zeros_like(cycle_consistency_reward))
+            
+            # Update last cycle positions for environments that completed a cycle
+            self.last_cycle_dof_pos[cycle_just_completed] = self.dof_pos[cycle_just_completed].clone()
+            
+            return cycle_consistency_reward
+        else:
+            # No cycle completion, no reward
+            return torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
