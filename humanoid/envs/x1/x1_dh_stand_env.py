@@ -634,7 +634,7 @@ class X1DHStandEnv(LeggedRobot):
 
     def _reward_feet_contact_number(self):
         """
-        Calculates a reward based on the number of feet contacts aligning with the gait phase. 
+        Calculates a reward based on the number of feet contacts aligning with the gait phase.
         Rewards or penalizes depending on whether the foot contact matches the expected gait phase.
         """
         contact = self.contact_forces[:, self.feet_indices, 2] > 5.
@@ -642,6 +642,40 @@ class X1DHStandEnv(LeggedRobot):
         stance_mask[torch.norm(self.commands[:, :3], dim=1) <= self.cfg.commands.stand_com_threshold] = 1
         reward = torch.where(contact == stance_mask, 1, -0.3)
         return torch.mean(reward, dim=1)
+
+    def _reward_cycle_reward(self):
+        """Reward matching the desired swing/stance phase.
+
+        This term encourages the feet contact pattern to follow the expected
+        gait phase derived from the internal phase generator. A perfect match
+        yields a reward close to ``1.0`` while mismatches reduce the value.
+        """
+        contact = self.contact_forces[:, self.feet_indices, 2] > 5.
+        stance_mask = self._get_stance_mask()
+        mismatch = torch.abs(contact.float() - stance_mask)
+        return 1.0 - mismatch.mean(dim=1)
+
+    def _reward_residual_ang_mom(self):
+        """Penalize residual angular momentum.
+
+        Large angular velocities of the robot base indicate remaining angular
+        momentum that can destabilize the gait. The squared magnitude is
+        returned so that a negative scale in the config results in a penalty.
+        """
+        ang_vel = self.base_ang_vel
+        return torch.sum(torch.square(ang_vel), dim=1)
+
+    def _reward_symmetry_reward(self):
+        """Encourage symmetric joint positions between left and right legs.
+
+        The mean absolute difference between corresponding left and right
+        joints is returned. Applying a negative weight punishes asymmetric
+        motions which helps reduce undesired turning or drifting.
+        """
+        left = self.dof_pos[:, :6]
+        right = self.dof_pos[:, 6:]
+        diff = torch.abs(left - right)
+        return -torch.mean(diff, dim=1)
 
     def _reward_orientation(self):
         """
