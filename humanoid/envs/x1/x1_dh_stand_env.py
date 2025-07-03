@@ -945,3 +945,33 @@ class X1DHStandEnv(LeggedRobot):
         else:
             # No cycle completion, no reward
             return torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+    
+    def _reward_angular_momentum_penalty(self):
+        """
+        v1.2: Residual angular momentum penalty - promotes stability by minimizing unwanted rotational motion.
+        Penalizes excessive angular momentum around the base, encouraging smoother and more controlled locomotion.
+        """
+        # Calculate angular momentum: L = I * omega
+        # For simplicity, we use base angular velocity as a proxy for angular momentum
+        angular_velocity = self.base_ang_vel  # Shape: (num_envs, 3)
+        
+        # Focus on roll and pitch angular velocities (x, y components)
+        # These are typically unwanted during normal locomotion
+        roll_pitch_ang_vel = angular_velocity[:, :2]  # Shape: (num_envs, 2)
+        
+        # Calculate magnitude of roll-pitch angular velocity
+        roll_pitch_magnitude = torch.norm(roll_pitch_ang_vel, dim=1)
+        
+        # Yaw angular velocity (z component) might be desired for turning
+        # Apply less penalty to yaw compared to roll-pitch
+        yaw_ang_vel = torch.abs(angular_velocity[:, 2])
+        
+        # Combine roll-pitch and yaw penalties with different weights
+        # Penalize roll-pitch more severely as they indicate instability
+        roll_pitch_penalty = torch.exp(-roll_pitch_magnitude * 5.0)
+        yaw_penalty = torch.exp(-yaw_ang_vel * 2.0)
+        
+        # Weighted combination (roll-pitch weighted more heavily)
+        angular_momentum_reward = 0.7 * roll_pitch_penalty + 0.3 * yaw_penalty
+        
+        return angular_momentum_reward
