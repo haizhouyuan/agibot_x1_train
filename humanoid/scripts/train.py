@@ -35,8 +35,14 @@ from humanoid.envs import *
 from humanoid.utils import get_args, task_registry
 
 def train(args):
-    env, env_cfg = task_registry.make_env(name=args.task, args=args)
-    ppo_runner, train_cfg, log_dir = task_registry.make_alg_runner(env=env, name=args.task, args=args)
+    # v1.7: Allow dynamic task/config selection based on version
+    task_name = args.task
+    if args.version and args.version != "1.6": # Assuming 1.6 is the default/base
+        task_name = f"{task_name}_v{args.version}"
+        print(f"Running with custom config version: {args.version}. Task name: {task_name}")
+
+    env, env_cfg = task_registry.make_env(name=task_name, args=args)
+    ppo_runner, train_cfg, log_dir = task_registry.make_alg_runner(env=env, name=task_name, args=args)
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=False)
 
 if __name__ == '__main__':

@@ -229,6 +229,12 @@ def get_args():
             "type": int,
             "help": "Maximum number of training iterations. Overrides config file if provided.",
         },
+        {
+            "name": "--version",
+            "type": str,
+            "default": "1.6",
+            "help": "Config version to use (e.g., 1.6, 1.7). Determines which config file to load.",
+        },
     ]
     # parse arguments
     args = gymutil.parse_arguments(

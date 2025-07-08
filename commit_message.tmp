@@ -1,3 +1,1 @@
-feat: Add fine-tuning script and config for stability
-
-Adds 'finetune.py' script and 'x1_dh_stand_finetune_config.py' to allow fine-tuning the v1.6 model (6900) with adjusted learning rate, reward scales, and entropy for improved stability.
+feat: Capture working state before v1.7 refactor

@@ -75,6 +75,13 @@ class DHOnPolicyRunner:
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
 
+        # v1.7: Add learning rate scheduler for annealing
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.alg.optimizer, lr_lambda=lambda it: max(1.0 - it / self.cfg.max_iterations, 1e-6)
+        )
+        # v1.7: Allow multiple critic updates per epoch
+        self.num_critic_updates_per_epoch = self.alg_cfg.get("num_critic_updates_per_epoch", 1)
+
         # init storage and model
         self.alg.init_storage(
             self.env.num_envs,
@@ -162,7 +169,22 @@ class DHOnPolicyRunner:
                 start = stop
                 self.alg.compute_returns(critic_obs)
 
-            mean_value_loss, mean_surrogate_loss, mean_state_estimator_loss = self.alg.update()
+            # v1.7: Implement multiple critic updates and single actor update
+            total_value_loss = 0
+            total_surrogate_loss = 0
+            
+            # Update Critic network multiple times
+            for _ in range(self.num_critic_updates_per_epoch):
+                value_loss, _ = self.alg.update_critic()
+                total_value_loss += value_loss
+
+            # Update Actor network once
+            surrogate_loss, mean_state_estimator_loss = self.alg.update_actor()
+            total_surrogate_loss += surrogate_loss
+
+            mean_value_loss = total_value_loss / self.num_critic_updates_per_epoch
+            mean_surrogate_loss = total_surrogate_loss
+
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:
@@ -170,6 +192,9 @@ class DHOnPolicyRunner:
             if it % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, "model_{}.pt".format(it)))
             ep_infos.clear()
+            
+            # v1.7: Step the scheduler
+            self.scheduler.step()
 
         self.current_learning_iteration += num_learning_iterations
         self.save(
@@ -213,7 +238,7 @@ class DHOnPolicyRunner:
         self.writer.add_scalar(
             "Loss/state_estimator", locs["mean_state_estimator_loss"], locs["it"]
         )
-        self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
+        self.writer.add_scalar("Loss/learning_rate", self.scheduler.get_last_lr()[0], locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar(

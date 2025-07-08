@@ -123,46 +123,13 @@ class DHPPO:
         last_values= self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
-    def update(self):
+    def update_critic(self):
         mean_value_loss = 0
-        mean_surrogate_loss = 0
-        mean_state_estimator_loss = 0
-
+        
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
+        for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch,             old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
 
-                self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
-                state_estimator_input = obs_batch[:,-self.num_short_obs:]
-                est_lin_vel = self.actor_critic.state_estimator(state_estimator_input)
-                ref_lin_vel = critic_obs_batch[:,self.lin_vel_idx:self.lin_vel_idx+3].clone()
-                actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
                 value_batch = self.actor_critic.evaluate(critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
-                mu_batch = self.actor_critic.action_mean
-                sigma_batch = self.actor_critic.action_std
-                entropy_batch = self.actor_critic.entropy
-
-                # KL
-                if self.desired_kl != None and self.schedule == 'adaptive':
-                    with torch.inference_mode():
-                        kl = torch.sum(
-                            torch.log(sigma_batch / old_sigma_batch + 1.e-5) + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch)) / (2.0 * torch.square(sigma_batch)) - 0.5, axis=-1)
-                        kl_mean = torch.mean(kl)
-
-                        if kl_mean > self.desired_kl * 2.0:
-                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                        elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
-                        
-                        for param_group in self.optimizer.param_groups:
-                            param_group['lr'] = self.learning_rate
-
-                # Surrogate loss
-                ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
-                surrogate = -torch.squeeze(advantages_batch) * ratio
-                surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
-                                                                                1.0 + self.clip_param)
-                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
                 # Value function loss
                 if self.use_clipped_value_loss:
@@ -174,28 +141,61 @@ class DHPPO:
                 else:
                     value_loss = (returns_batch - value_batch).pow(2).mean()
 
-                # update all actor_critic.parameters()
-                loss = (surrogate_loss + 
-                        self.value_loss_coef * value_loss - 
-                        self.entropy_coef * entropy_batch.mean() +
-                        torch.nn.MSELoss()(est_lin_vel, ref_lin_vel))
-                
-                # Gradient step
+                # Critic Gradient step
                 self.optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+                (self.value_loss_coef * value_loss).backward()
+                nn.utils.clip_grad_norm_(self.actor_critic.critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
+                mean_value_loss += value_loss.item()
+
+        num_updates = self.num_learning_epochs * self.num_mini_batches
+        mean_value_loss /= num_updates
+        return mean_value_loss, None
+
+    def update_actor(self):
+        mean_surrogate_loss = 0
+        mean_state_estimator_loss = 0
+
+        generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch,             old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
+
+                self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+                state_estimator_input = obs_batch[:,-self.num_short_obs:]
+                est_lin_vel = self.actor_critic.state_estimator(state_estimator_input)
+                ref_lin_vel = critic_obs_batch[:,self.lin_vel_idx:self.lin_vel_idx+3].clone()
+                actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
+                mu_batch = self.actor_critic.action_mean
+                sigma_batch = self.actor_critic.action_std
+                entropy_batch = self.actor_critic.entropy
+
+                # Surrogate loss
+                ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
+                surrogate = -torch.squeeze(advantages_batch) * ratio
+                surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param,
+                                                                                1.0 + self.clip_param)
+                surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+                
                 state_estimator_loss = torch.nn.MSELoss()(est_lin_vel, ref_lin_vel)
 
-                mean_value_loss += value_loss.item()
+                # Actor loss
+                loss = (surrogate_loss - 
+                        self.entropy_coef * entropy_batch.mean() +
+                        state_estimator_loss)
+                
+                # Actor Gradient step
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.actor_critic.actor.parameters(), self.max_grad_norm)
+                nn.utils.clip_grad_norm_(self.actor_critic.state_estimator.parameters(), self.max_grad_norm)
+                self.optimizer.step()
+
                 mean_surrogate_loss += surrogate_loss.item()
                 mean_state_estimator_loss += state_estimator_loss.item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
-        mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
         mean_state_estimator_loss /= num_updates
         self.storage.clear()
 
-        return mean_value_loss, mean_surrogate_loss, mean_state_estimator_loss
+        return mean_surrogate_loss, mean_state_estimator_loss
