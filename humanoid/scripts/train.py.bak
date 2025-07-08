@@ -34,23 +34,7 @@
 from humanoid.envs import *
 from humanoid.utils import get_args, task_registry
 
-# Manual registration for v1.7 task
-def ensure_v17_task_registered():
-    try:
-        from humanoid.envs.x1.x1_dh_stand_config_v1_7 import X1DHStandCfg as X1DHStandCfgV17, X1DHStandCfgPPO as X1DHStandCfgPPOV17
-        from humanoid.envs.x1.x1_dh_stand_env import X1DHStandEnv
-        if 'x1_dh_stand_v1.7' not in task_registry.task_classes:
-            task_registry.register('x1_dh_stand_v1.7', X1DHStandEnv, X1DHStandCfgV17(), X1DHStandCfgPPOV17())
-            print("Successfully registered x1_dh_stand_v1.7 task")
-        else:
-            print("x1_dh_stand_v1.7 task already registered")
-    except ImportError as e:
-        print(f"Failed to register v1.7 task: {e}")
-
 def train(args):
-    # Ensure v1.7 task is registered
-    ensure_v17_task_registered()
-    
     # v1.7: Allow dynamic task/config selection based on version
     task_name = args.task
     if args.version and args.version != "1.6": # Assuming 1.6 is the default/base

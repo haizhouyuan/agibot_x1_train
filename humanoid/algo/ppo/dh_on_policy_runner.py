@@ -77,7 +77,7 @@ class DHOnPolicyRunner:
 
         # v1.7: Add learning rate scheduler for annealing
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
-            self.alg.optimizer, lr_lambda=lambda it: max(1.0 - it / self.cfg.max_iterations, 1e-6)
+            self.alg.optimizer, lr_lambda=lambda it: max(1.0 - it / self.cfg["max_iterations"], 1e-6)
         )
         # v1.7: Allow multiple critic updates per epoch
         self.num_critic_updates_per_epoch = self.alg_cfg.get("num_critic_updates_per_epoch", 1)
