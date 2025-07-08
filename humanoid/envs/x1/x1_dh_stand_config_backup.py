@@ -384,12 +384,6 @@ class X1DHStandCfgPPO(LeggedRobotCfgPPO):
         lh_output_dim= 64   #long history output dim
         in_channels = X1DHStandCfg.env.frame_stack
 
-        # v1.4: LSTM网络配置
-        use_lstm = True
-        lstm_hidden_size = 512
-        sequence_length = 16
-        num_layers = 1
-
     class algorithm(LeggedRobotCfgPPO.algorithm):
         entropy_coef = 0.001
         learning_rate = 1e-5
