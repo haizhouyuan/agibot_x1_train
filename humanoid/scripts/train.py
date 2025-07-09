@@ -47,9 +47,23 @@ def ensure_v17_task_registered():
     except ImportError as e:
         print(f"Failed to register v1.7 task: {e}")
 
+# Manual registration for v1.8 task
+def ensure_v18_task_registered():
+    try:
+        from humanoid.envs.x1.x1_dh_stand_config_v1_8 import X1DHStandCfgV18, X1DHStandCfgPPOV18
+        from humanoid.envs.x1.x1_dh_stand_env import X1DHStandEnv
+        if 'x1_dh_stand_v1.8' not in task_registry.task_classes:
+            task_registry.register('x1_dh_stand_v1.8', X1DHStandEnv, X1DHStandCfgV18(), X1DHStandCfgPPOV18())
+            print("Successfully registered x1_dh_stand_v1.8 task")
+        else:
+            print("x1_dh_stand_v1.8 task already registered")
+    except ImportError as e:
+        print(f"Failed to register v1.8 task: {e}")
+
 def train(args):
-    # Ensure v1.7 task is registered
+    # Ensure v1.7 and v1.8 tasks are registered
     ensure_v17_task_registered()
+    ensure_v18_task_registered()
     
     # v1.7: Allow dynamic task/config selection based on version
     task_name = args.task

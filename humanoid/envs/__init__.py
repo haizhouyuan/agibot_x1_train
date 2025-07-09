@@ -35,9 +35,11 @@ from humanoid import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .base.legged_robot import LeggedRobot
 
 from .x1.x1_dh_stand_config  import X1DHStandCfg, X1DHStandCfgPPO
+from .x1.x1_dh_stand_config_v1_8 import X1DHStandCfgV18, X1DHStandCfgPPOV18
 
 from .x1.x1_dh_stand_env import X1DHStandEnv
 
 from humanoid.utils.task_registry import task_registry
 
 task_registry.register( "x1_dh_stand", X1DHStandEnv, X1DHStandCfg(), X1DHStandCfgPPO() )
+task_registry.register( "x1_dh_stand_v1.8", X1DHStandEnv, X1DHStandCfgV18(), X1DHStandCfgPPOV18() )

@@ -975,3 +975,89 @@ class X1DHStandEnv(LeggedRobot):
         angular_momentum_reward = 0.7 * roll_pitch_penalty + 0.3 * yaw_penalty
         
         return angular_momentum_reward
+    
+    # ===== v1.8 Enhanced Stability Reward Functions =====
+    
+    def _reward_torso_angular_velocity(self):
+        """
+        v1.8: Penalizes torso angular velocity to promote stable upper body control.
+        Addresses the issue of violent torso swaying observed in v1.7.
+        """
+        # Get base angular velocity
+        angular_vel = self.base_ang_vel  # Shape: (num_envs, 3)
+        
+        # Calculate squared magnitude to penalize high angular velocities
+        angular_vel_penalty = torch.sum(torch.square(angular_vel), dim=1)
+        
+        return angular_vel_penalty
+    
+    def _reward_lateral_movement(self):
+        """
+        v1.8: Penalizes lateral (sideways) movement to encourage straight-line walking.
+        Addresses the issue of side-to-side swaying observed in v1.7.
+        """
+        # Get base linear velocity in y-axis (lateral direction)
+        lateral_velocity = self.base_lin_vel[:, 1]  # Shape: (num_envs,)
+        
+        # Apply penalty based on lateral velocity threshold
+        lateral_penalty = torch.where(
+            torch.abs(lateral_velocity) > self.cfg.rewards.lateral_velocity_threshold,
+            torch.square(lateral_velocity),
+            torch.zeros_like(lateral_velocity)
+        )
+        
+        return lateral_penalty
+    
+    def _reward_excessive_foot_clearance(self):
+        """
+        v1.8: Penalizes excessive foot lifting to promote energy-efficient gait.
+        Addresses the issue of violent high-step gait observed in v1.7.
+        """
+        # Get foot positions (ankle positions as proxy)
+        foot_positions = self.rigid_state[:, self.feet_indices, :3]  # Shape: (num_envs, 2, 3)
+        foot_heights = foot_positions[:, :, 2]  # Z-coordinates (heights)
+        
+        # Calculate height above ground (assuming ground at z=0 approximately)
+        # Use a small offset for ground contact detection
+        ground_clearance = foot_heights - 0.02  # 2cm ground clearance allowance
+        
+        # Penalize foot heights above the maximum allowed clearance
+        excessive_clearance = torch.where(
+            ground_clearance > self.cfg.rewards.max_foot_clearance,
+            torch.square(ground_clearance - self.cfg.rewards.max_foot_clearance),
+            torch.zeros_like(ground_clearance)
+        )
+        
+        # Sum penalties for both feet
+        total_penalty = torch.sum(excessive_clearance, dim=1)
+        
+        return total_penalty
+    
+    def _reward_action_rate(self):
+        """
+        v1.8: Penalizes rapid changes in actions to promote smooth control.
+        Addresses the issue of jerky, discontinuous motion observed in v1.7.
+        """
+        # Calculate action rate (change in actions between timesteps)
+        if hasattr(self, 'last_actions'):
+            action_rate = torch.sum(torch.square(self.actions - self.last_actions), dim=1)
+        else:
+            # First timestep, no previous actions
+            action_rate = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        
+        return action_rate
+    
+    def _reward_joint_acceleration(self):
+        """
+        v1.8: Direct penalty for joint acceleration to promote smooth motion.
+        More targeted than the existing dof_acc reward, specifically for v1.8 stability focus.
+        """
+        # Calculate joint acceleration as change in velocity
+        if hasattr(self, 'last_dof_vel'):
+            joint_acceleration = (self.dof_vel - self.last_dof_vel) / self.dt
+            acceleration_penalty = torch.sum(torch.square(joint_acceleration), dim=1)
+        else:
+            # First timestep, no previous velocities
+            acceleration_penalty = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        
+        return acceleration_penalty
