@@ -67,7 +67,22 @@ class ExportedDH(torch.nn.Module):
         traced_script_module.save(path)  
     
 
+def ensure_v18_task_registered():
+    try:
+        from humanoid.envs.x1.x1_dh_stand_config_v1_8 import X1DHStandCfgV18, X1DHStandCfgPPOV18
+        from humanoid.envs.x1.x1_dh_stand_env import X1DHStandEnv
+        if 'x1_dh_stand_v1.8' not in task_registry.task_classes:
+            task_registry.register('x1_dh_stand_v1.8', X1DHStandEnv, X1DHStandCfgV18(), X1DHStandCfgPPOV18())
+            print("Successfully registered x1_dh_stand_v1.8 task")
+        else:
+            print("x1_dh_stand_v1.8 task already registered")
+    except ImportError as e:
+        print(f"Failed to register v1.8 task: {e}")
+
 def export_policy(args):
+    # Ensure v1.8 task is registered
+    ensure_v18_task_registered()
+    
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     
     train_cfg_dict = class_to_dict(train_cfg)

@@ -31,22 +31,31 @@ pip install -e .
 
 ```bash
 # Train a model
-python scripts/train.py --task=x1_dh_stand --run_name=<run_name> --headless
+python humanoid/scripts/train.py --task=x1_dh_stand --run_name=<run_name> --headless
+
+# Train with specific version (v1.8)
+python humanoid/scripts/train.py --task=x1_dh_stand --version=1.8 --run_name=<run_name> --headless
 
 # Test/play trained model
-python scripts/play.py --task=x1_dh_stand --load_run=<date_time><run_name>
+python humanoid/scripts/play.py --task=x1_dh_stand --load_run=<date_time><run_name>
 
 # Export policy to JIT format
-python scripts/export_policy_dh.py --task=x1_dh_stand --load_run=<date_time><run_name>
+python humanoid/scripts/export_policy_dh.py --task=x1_dh_stand --load_run=<date_time><run_name>
+
+# Export policy to JIT format (v1.8)
+python humanoid/scripts/export_policy_dh.py --task=x1_dh_stand_v1.8 --load_run=<date_time><run_name>
 
 # Export policy to ONNX format
-python scripts/export_onnx_dh.py --task=x1_dh_stand --load_run=<date_time>
+python humanoid/scripts/export_onnx_dh.py --task=x1_dh_stand --load_run=<date_time>
+
+# Export policy to ONNX format (v1.8)
+python humanoid/scripts/export_onnx_dh.py --task=x1_dh_stand_v1.8 --load_run=<date_time>
 
 # Sim2sim validation with MuJoCo
-python scripts/sim2sim.py --task=x1_dh_stand --load_model /path/to/exported_policies/
+python humanoid/scripts/sim2sim.py --task=x1_dh_stand --load_model /path/to/exported_policies/
 
 # Fine-tuning from checkpoint
-python scripts/finetune.py --task=x1_dh_stand --load_run=<date_time><run_name>
+python humanoid/scripts/finetune.py --task=x1_dh_stand --load_run=<date_time><run_name>
 ```
 
 ## Architecture Overview
@@ -54,7 +63,7 @@ python scripts/finetune.py --task=x1_dh_stand --load_run=<date_time><run_name>
 ### Environment Structure
 - **Base Classes**: `LeggedRobot` and `LeggedRobotCfg` in `humanoid/envs/base/` provide the foundation
 - **X1 Environment**: `X1DHStandEnv` in `humanoid/envs/x1/` implements the specific humanoid standing task
-- **Config Versions**: Multiple config versions exist (v1.6, v1.7, finetune) with different hyperparameters and stability improvements
+- **Config Versions**: Multiple config versions exist (v1.6, v1.7, v1.8, finetune) with different hyperparameters and stability improvements
 
 ### Algorithm Components
 - **PPO Implementation**: Custom PPO in `humanoid/algo/ppo/` with actor-critic architecture
@@ -74,15 +83,23 @@ python scripts/finetune.py --task=x1_dh_stand --load_run=<date_time><run_name>
 
 ### Version Management
 - v1.7 includes stability improvements with residual angular momentum penalties
-- Manual registration for v1.7 task in `train.py` ensures backward compatibility
+- v1.8 includes enhanced stability improvements and disturbance resilience features
+- Manual registration for v1.7 and v1.8 tasks in `train.py` ensures backward compatibility
 - Config files maintain different hyperparameter sets for different training phases
 
 ## Working with Models
 
 Trained models are saved in `logs/<experiment_name>/exported_data/<timestamp>/` with:
 - `.pt` files for PyTorch checkpoints
-- `.jit` files for deployment-ready TorchScript models
-- `.onnx` files for cross-platform inference
+- `.jit` files for deployment-ready TorchScript models (in `exported_policies/`)
+- `.onnx` files for cross-platform inference (in `exported_onnx/`)
+
+### Latest Training Results (v1.8)
+- **Training Run**: `2025-07-10_08-13-42v1_8_production`
+- **Iterations**: 20,000 training iterations completed
+- **JIT Export**: Available at `logs/x1_dh_stand_v1_8/exported_policies/2025-07-10_16-14-03/policy_dh.jit`
+- **ONNX Export**: Available at `logs/x1_dh_stand_v1_8/exported_onnx/2025-07-10_16-14-15/x1_policy.onnx`
+- **Training Data Archive**: Complete training data archived at `/autodl-tmp/agibot_x1_train_v1_8_complete.tar.gz`
 
 ## Common Tasks
 
