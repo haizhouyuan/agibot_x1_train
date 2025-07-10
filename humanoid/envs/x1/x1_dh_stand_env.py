@@ -114,7 +114,10 @@ class X1DHStandEnv(LeggedRobot):
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
         self.last_feet_z = self.cfg.rewards.feet_to_ankle_distance
         self.feet_height = torch.zeros((self.num_envs, 2), device=self.device)
-        self.ref_dof_pos = torch.zeros((self.num_envs, self.num_actions), device=self.device)      
+        self.ref_dof_pos = torch.zeros((self.num_envs, self.num_actions), device=self.device)
+        
+        # v1.9: Initialize push tracking for disturbance detection
+        self.push_step_counter = 0      
 
 
     def _push_robots(self):
@@ -441,7 +444,22 @@ class X1DHStandEnv(LeggedRobot):
         q = (self.lagged_dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos
         dq = self.lagged_dof_vel * self.obs_scales.dof_vel  
 
-        # 47
+        # v1.9: Enhanced observation space with push indicators and contact state
+        # Calculate push flag (1 if push occurred in current timestep, 0 otherwise)
+        push_flag = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.float)
+        if self.cfg.domain_rand.push_robots:
+            # Check if push should occur this timestep
+            push_interval_steps = int(self.cfg.domain_rand.push_interval_s / self.dt / self.cfg.control.decimation)
+            push_occurring = (self.common_step_counter % push_interval_steps) == 0
+            if push_occurring:
+                push_flag.fill_(1.0)
+                # Store push timestep for reward functions
+                self.push_step_counter = self.common_step_counter
+        
+        # Get foot contact states (already calculated earlier)
+        contact_state = contact_mask.float()  # Shape: (num_envs, 2)
+
+        # 50 = 47 + 3 (push_flag + 2 contact states)
         obs_buf = torch.cat((
             self.command_input,  # 5 = 2D(sin cos) + 3D(vel_x, vel_y, aug_vel_yaw)
             q,    # 12
@@ -449,6 +467,8 @@ class X1DHStandEnv(LeggedRobot):
             self.actions,   # 12
             self.lagged_base_ang_vel * self.obs_scales.ang_vel,  # 3
             self.lagged_base_euler_xyz * self.obs_scales.quat,  # 3
+            push_flag,  # 1 - v1.9: Push disturbance indicator
+            contact_state,  # 2 - v1.9: Foot contact states (left, right)
         ), dim=-1)
 
         if self.cfg.env.num_single_obs == 48:
@@ -1061,3 +1081,153 @@ class X1DHStandEnv(LeggedRobot):
             acceleration_penalty = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         
         return acceleration_penalty
+    
+    # ===== v1.9 Disturbance Resilience & Fast Recovery Reward Functions =====
+    
+    def _reward_balance_recovery(self):
+        """
+        v1.9: Reward for maintaining/quickly returning to balanced posture after disturbances.
+        Promotes rapid recovery from tilts caused by pushes or terrain changes.
+        """
+        # Calculate absolute roll and pitch angles from base orientation
+        roll = torch.abs(self.base_euler_xyz[:, 0])
+        pitch = torch.abs(self.base_euler_xyz[:, 1])
+        
+        # Define stability threshold (configurable in rewards config)
+        stable_threshold = self.cfg.rewards.balance_stability_threshold
+        stable = (roll < stable_threshold) & (pitch < stable_threshold)
+        
+        # Reward 1.0 if stable, 0.0 if not - encourages quick return to upright
+        return stable.float()
+    
+    def _reward_disturbance_response(self):
+        """
+        v1.9: Reward for appropriate response to external disturbances.
+        Encourages reactive stepping and balance corrections when pushed.
+        """
+        # Detect if a push occurred recently (within last few timesteps)
+        push_occurred = False
+        if hasattr(self, 'push_step_counter'):
+            # Check if push happened in last 5 timesteps
+            steps_since_push = self.common_step_counter - self.push_step_counter
+            push_occurred = (steps_since_push >= 0) & (steps_since_push <= 5)
+        
+        if push_occurred:
+            # During/after push, reward stability and appropriate reactions
+            # Measure base angular velocity magnitude as response indicator
+            angular_response = torch.norm(self.base_ang_vel, dim=1)
+            
+            # Reward moderate response (not too passive, not too violent)
+            # Optimal response is around 0.5-2.0 rad/s angular velocity
+            optimal_response = torch.exp(-torch.square(angular_response - 1.0) / 0.5)
+            return optimal_response
+        else:
+            # No recent push, reward normal stability
+            return torch.ones(self.num_envs, device=self.device, dtype=torch.float)
+    
+    def _reward_velocity_recovery(self):
+        """
+        v1.9: Reward for quickly recovering target velocity after disruption.
+        Encourages the robot to resume commanded motion rapidly after disturbances.
+        """
+        # Calculate velocity tracking error
+        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
+        ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
+        
+        # Combined velocity error
+        total_vel_error = lin_vel_error + ang_vel_error
+        
+        # Track if we're in a recovery phase (after disturbance)
+        if hasattr(self, 'push_step_counter'):
+            steps_since_push = self.common_step_counter - self.push_step_counter
+            in_recovery = (steps_since_push >= 0) & (steps_since_push <= self.cfg.rewards.recovery_time_window)
+            
+            if torch.any(in_recovery):
+                # During recovery, strongly reward low velocity error
+                recovery_reward = torch.exp(-total_vel_error * 3.0)  # Stronger sigma for recovery
+                return torch.where(in_recovery, recovery_reward, 
+                                 torch.exp(-total_vel_error * 1.0))  # Normal reward otherwise
+        
+        # Normal velocity tracking reward
+        return torch.exp(-total_vel_error * 1.0)
+    
+    def _reward_postural_stability(self):
+        """
+        v1.9: Reward for maintaining stable posture during disturbances.
+        Focuses on minimizing unwanted tilting and maintaining proper stance.
+        """
+        # Calculate orientation deviation from upright
+        target_orientation = torch.tensor(self.cfg.rewards.torso_orientation_target, 
+                                        device=self.device, dtype=torch.float)
+        orientation_error = torch.sum(torch.square(self.base_euler_xyz[:, :3] - target_orientation), dim=1)
+        
+        # Calculate base height stability (should stay near target)
+        height_error = torch.square(self.root_states[:, 2] - self.cfg.rewards.base_height_target)
+        
+        # Combined postural stability
+        postural_error = orientation_error + height_error * 2.0  # Weight height more
+        
+        # Exponential reward for good posture
+        stability_reward = torch.exp(-postural_error * 4.0)
+        
+        return stability_reward
+    
+    def _reward_contact_stability(self):
+        """
+        v1.9: Reward for maintaining appropriate foot contact during recovery.
+        Encourages proper foot placement and prevents excessive air time during disturbances.
+        """
+        # Calculate expected contact pattern based on gait phase
+        contact_mask = self.contact_forces[:, self.feet_indices, 2] > 5.0  # Feet in contact
+        
+        # During normal walking, expect alternating contact
+        # During disturbance recovery, prefer more contact for stability
+        if hasattr(self, 'push_step_counter'):
+            steps_since_push = self.common_step_counter - self.push_step_counter
+            in_recovery = (steps_since_push >= 0) & (steps_since_push <= 20)  # Short recovery window
+            
+            if torch.any(in_recovery):
+                # During recovery, reward having at least one foot down
+                any_contact = torch.any(contact_mask, dim=1)
+                return torch.where(in_recovery, any_contact.float(), 
+                                 torch.ones(self.num_envs, device=self.device, dtype=torch.float))
+        
+        # Normal contact reward - based on expected gait pattern
+        return torch.ones(self.num_envs, device=self.device, dtype=torch.float)
+    
+    def _reward_angular_momentum_control(self):
+        """
+        v1.9: Enhanced angular momentum control specifically for disturbance scenarios.
+        Builds on v1.2 angular momentum penalty with disturbance-specific logic.
+        """
+        # Calculate angular momentum components
+        angular_velocity = self.base_ang_vel  # Shape: (num_envs, 3)
+        
+        # During disturbances, allow some angular momentum for balance corrections
+        # During normal operation, minimize angular momentum
+        if hasattr(self, 'push_step_counter'):
+            steps_since_push = self.common_step_counter - self.push_step_counter
+            in_disturbance = (steps_since_push >= 0) & (steps_since_push <= 10)
+            
+            # During disturbance: allow moderate angular momentum, penalize excessive
+            # Normal operation: minimize all angular momentum
+            disturbance_threshold = 2.0  # rad/s
+            normal_threshold = 0.5  # rad/s
+            
+            angular_magnitude = torch.norm(angular_velocity, dim=1)
+            
+            disturbance_penalty = torch.where(
+                angular_magnitude > disturbance_threshold,
+                torch.square(angular_magnitude - disturbance_threshold),
+                torch.zeros_like(angular_magnitude)
+            )
+            
+            normal_penalty = torch.square(angular_magnitude)
+            
+            # Choose penalty based on disturbance state
+            penalty = torch.where(in_disturbance, disturbance_penalty, normal_penalty)
+            return penalty
+        
+        # Fallback to normal angular momentum penalty
+        angular_magnitude = torch.norm(angular_velocity, dim=1)
+        return torch.square(angular_magnitude)
