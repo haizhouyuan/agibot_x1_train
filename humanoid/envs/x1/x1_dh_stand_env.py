@@ -38,9 +38,17 @@ from humanoid.utils.math import wrap_to_pi
 
 
 import torch
+from enum import Enum
 from humanoid.envs import LeggedRobot
 
 from humanoid.utils.terrain import  Terrain
+
+
+class GaitState(Enum):
+    """Enumeration for gait states to handle walk-to-stand transitions"""
+    WALKING = "walking"
+    TRANSITIONING = "transitioning" 
+    STANDING = "standing"
 
 def copysign_new(a, b):
 
@@ -114,7 +122,14 @@ class X1DHStandEnv(LeggedRobot):
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
         self.last_feet_z = self.cfg.rewards.feet_to_ankle_distance
         self.feet_height = torch.zeros((self.num_envs, 2), device=self.device)
-        self.ref_dof_pos = torch.zeros((self.num_envs, self.num_actions), device=self.device)      
+        self.ref_dof_pos = torch.zeros((self.num_envs, self.num_actions), device=self.device)
+        
+        # V2.2: Add transition state management for smooth walk-to-stand transitions
+        # State encoding: 0=WALKING, 1=TRANSITIONING, 2=STANDING
+        self.gait_state = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)  # Start in WALKING
+        self.transition_timer = torch.zeros(self.num_envs, device=self.device)
+        self.transition_duration = getattr(cfg.commands, 'transition_duration', 1.0)  # Default 1 second
+        self.previous_command_norm = torch.zeros(self.num_envs, device=self.device)      
 
 
     def _push_robots(self):
@@ -133,17 +148,123 @@ class X1DHStandEnv(LeggedRobot):
         self.gym.set_actor_root_state_tensor(
             self.sim, gymtorch.unwrap_tensor(self.root_states))
 
+    def _update_gait_state(self):
+        """V2.2: Update gait state for smooth walk-to-stand transitions"""
+        current_command_norm = torch.norm(self.commands[:, :3], dim=1)
+        stand_command = current_command_norm <= self.cfg.commands.stand_com_threshold
+        walk_command = current_command_norm > self.cfg.commands.stand_com_threshold
+        
+        # State transitions
+        walking_mask = self.gait_state == 0  # WALKING
+        transitioning_mask = self.gait_state == 1  # TRANSITIONING
+        standing_mask = self.gait_state == 2  # STANDING
+        
+        # Transition from WALKING to TRANSITIONING when stand command is given
+        start_transition = walking_mask & stand_command
+        self.gait_state[start_transition] = 1  # TRANSITIONING
+        self.transition_timer[start_transition] = 0.0
+        
+        # Transition from STANDING to WALKING when walk command is given
+        start_walking = standing_mask & walk_command
+        self.gait_state[start_walking] = 0  # WALKING
+        self.transition_timer[start_walking] = 0.0
+        
+        # Update transition timer
+        self.transition_timer[transitioning_mask] += self.dt
+        
+        # Complete transition from TRANSITIONING to STANDING
+        transition_complete = transitioning_mask & (self.transition_timer >= self.transition_duration)
+        # Also check if both feet are in contact for stable transition
+        both_feet_contact = self._check_both_feet_stable()
+        complete_transition = transition_complete & both_feet_contact
+        self.gait_state[complete_transition] = 2  # STANDING
+        
+        self.previous_command_norm = current_command_norm.clone()
+
+    def _check_both_feet_stable(self):
+        """V2.2: Check if both feet are in stable contact with ground"""
+        foot_contact = self.contact_forces[:, self.feet_indices, 2] > 5.0
+        both_feet_stable = torch.all(foot_contact, dim=1)
+        return both_feet_stable
+    
+    def _get_transition_progress(self):
+        """V2.2: Get transition progress for smooth interpolation"""
+        transitioning_mask = self.gait_state == 1
+        progress = torch.zeros(self.num_envs, device=self.device)
+        progress[transitioning_mask] = torch.clamp(
+            self.transition_timer[transitioning_mask] / self.transition_duration, 0.0, 1.0
+        )
+        return progress
+    
+    def _get_coordinated_foot_transition(self):
+        """V2.2: Get coordinated foot landing sequence during transitions"""
+        transition_progress = self._get_transition_progress()
+        transitioning_mask = self.gait_state == 1
+        
+        # Phase-based foot priority: swing foot lands first, then stance foot coordinates
+        phase = self._get_phase()
+        sin_pos = torch.sin(2 * torch.pi * phase)
+        
+        # Determine which foot is currently swinging (should land first)
+        left_swing = sin_pos <= 0  # Left foot in swing when sin_pos <= 0
+        right_swing = sin_pos > 0   # Right foot in swing when sin_pos > 0
+        
+        # Foot landing timing - swing foot gets priority
+        swing_foot_progress = torch.clamp(transition_progress * 2.0, 0.0, 1.0)  # Complete in first half
+        stance_foot_progress = torch.clamp((transition_progress - 0.5) * 2.0, 0.0, 1.0)  # Start after swing
+        
+        # Initialize progress for both feet
+        left_foot_progress = torch.zeros(self.num_envs, device=self.device)
+        right_foot_progress = torch.zeros(self.num_envs, device=self.device)
+        
+        # Apply coordinated timing only during transition
+        transitioning_envs = transitioning_mask
+        
+        # Left foot timing
+        left_foot_progress[transitioning_envs & left_swing] = swing_foot_progress[transitioning_envs & left_swing]
+        left_foot_progress[transitioning_envs & right_swing] = stance_foot_progress[transitioning_envs & right_swing]
+        
+        # Right foot timing  
+        right_foot_progress[transitioning_envs & right_swing] = swing_foot_progress[transitioning_envs & right_swing]
+        right_foot_progress[transitioning_envs & left_swing] = stance_foot_progress[transitioning_envs & left_swing]
+        
+        # For non-transitioning environments, use standard values
+        left_foot_progress[~transitioning_mask] = 1.0
+        right_foot_progress[~transitioning_mask] = 1.0
+        
+        return left_foot_progress, right_foot_progress
+
     def  _get_phase(self):
+        """V2.2: Enhanced phase calculation with smooth transition support"""
         cycle_time = self.cfg.rewards.cycle_time
+        
+        # Update gait state first
+        self._update_gait_state()
+        
         if self.cfg.commands.sw_switch:
-            stand_command = (torch.norm(self.commands[:, :3], dim=1) <= self.cfg.commands.stand_com_threshold)
-            self.phase_length_buf[stand_command] = 0 # set this as 0 for which env is standing
-            # self.gait_start is rand 0 or 0.5
-            phase = (self.phase_length_buf * self.dt / cycle_time + self.gait_start) * (~stand_command)
+            # V2.2: Use gait state instead of immediate command check
+            walking_mask = self.gait_state == 0  # WALKING
+            transitioning_mask = self.gait_state == 1  # TRANSITIONING
+            standing_mask = self.gait_state == 2  # STANDING
+            
+            # For standing robots, phase is 0
+            self.phase_length_buf[standing_mask] = 0
+            
+            # For transitioning robots, gradually reduce phase
+            transition_progress = self._get_transition_progress()
+            transitioning_phase_factor = 1.0 - transition_progress
+            
+            # Calculate base phase for walking and transitioning robots
+            base_phase = self.phase_length_buf * self.dt / cycle_time + self.gait_start
+            
+            # Apply phase calculation
+            phase = torch.zeros_like(base_phase)
+            phase[walking_mask] = base_phase[walking_mask]
+            phase[transitioning_mask] = base_phase[transitioning_mask] * transitioning_phase_factor[transitioning_mask]
+            phase[standing_mask] = 0.0
         else:
             phase = self.episode_length_buf * self.dt / cycle_time + self.gait_start
 
-        # phase continue increase，if want robot stand, set 0
         return phase
 
     def _get_stance_mask(self):
@@ -272,30 +393,62 @@ class X1DHStandEnv(LeggedRobot):
                 self.rand_push_torque.zero_()
 
     def compute_ref_state(self):
+        """V2.2: Enhanced reference state computation with coordinated foot transitions"""
         phase = self._get_phase()
         sin_pos = torch.sin(2 * torch.pi * phase)
         sin_pos_l = sin_pos.clone()
         sin_pos_r = sin_pos.clone()
 
         self.ref_dof_pos = torch.zeros_like(self.dof_pos)
-        # left swing
+        
+        # V2.2: Get coordinated foot transition progress
+        left_foot_progress, right_foot_progress = self._get_coordinated_foot_transition()
+        transitioning_mask = self.gait_state == 1
+        standing_mask = self.gait_state == 2
+        
+        # Original swing logic for walking
         sin_pos_l[sin_pos_l > 0] = 0
-        self.ref_dof_pos[:, 0] = -sin_pos_l * self.cfg.rewards.final_swing_joint_delta_pos[0]
-        self.ref_dof_pos[:, 1] = -sin_pos_l * self.cfg.rewards.final_swing_joint_delta_pos[1]
-        self.ref_dof_pos[:, 2] = -sin_pos_l * self.cfg.rewards.final_swing_joint_delta_pos[2]
-        self.ref_dof_pos[:, 3] = -sin_pos_l * self.cfg.rewards.final_swing_joint_delta_pos[3]
-        self.ref_dof_pos[:, 4] = -sin_pos_l * self.cfg.rewards.final_swing_joint_delta_pos[4]
-        self.ref_dof_pos[:, 5] = -sin_pos_l * self.cfg.rewards.final_swing_joint_delta_pos[5]
-        # right
         sin_pos_r[sin_pos_r < 0] = 0
-        self.ref_dof_pos[:, 6] = sin_pos_r *  self.cfg.rewards.final_swing_joint_delta_pos[6]
-        self.ref_dof_pos[:, 7] = sin_pos_r *  self.cfg.rewards.final_swing_joint_delta_pos[7]
-        self.ref_dof_pos[:, 8] = sin_pos_r *  self.cfg.rewards.final_swing_joint_delta_pos[8]
-        self.ref_dof_pos[:, 9] = sin_pos_r *  self.cfg.rewards.final_swing_joint_delta_pos[9]
-        self.ref_dof_pos[:, 10] = sin_pos_r * self.cfg.rewards.final_swing_joint_delta_pos[10]
-        self.ref_dof_pos[:, 11] = sin_pos_r * self.cfg.rewards.final_swing_joint_delta_pos[11]
+        
+        # Left leg joints (0-5)
+        left_swing_deltas = torch.zeros((self.num_envs, 6), device=self.device)
+        left_swing_deltas[:, 0] = -sin_pos_l * self.cfg.rewards.final_swing_joint_delta_pos[0]
+        left_swing_deltas[:, 1] = -sin_pos_l * self.cfg.rewards.final_swing_joint_delta_pos[1]
+        left_swing_deltas[:, 2] = -sin_pos_l * self.cfg.rewards.final_swing_joint_delta_pos[2]
+        left_swing_deltas[:, 3] = -sin_pos_l * self.cfg.rewards.final_swing_joint_delta_pos[3]
+        left_swing_deltas[:, 4] = -sin_pos_l * self.cfg.rewards.final_swing_joint_delta_pos[4]
+        left_swing_deltas[:, 5] = -sin_pos_l * self.cfg.rewards.final_swing_joint_delta_pos[5]
+        
+        # Right leg joints (6-11)
+        right_swing_deltas = torch.zeros((self.num_envs, 6), device=self.device)
+        right_swing_deltas[:, 0] = sin_pos_r * self.cfg.rewards.final_swing_joint_delta_pos[6]
+        right_swing_deltas[:, 1] = sin_pos_r * self.cfg.rewards.final_swing_joint_delta_pos[7]
+        right_swing_deltas[:, 2] = sin_pos_r * self.cfg.rewards.final_swing_joint_delta_pos[8]
+        right_swing_deltas[:, 3] = sin_pos_r * self.cfg.rewards.final_swing_joint_delta_pos[9]
+        right_swing_deltas[:, 4] = sin_pos_r * self.cfg.rewards.final_swing_joint_delta_pos[10]
+        right_swing_deltas[:, 5] = sin_pos_r * self.cfg.rewards.final_swing_joint_delta_pos[11]
+        
+        # V2.2: Apply coordinated transition smoothing
+        # For transitioning robots, interpolate towards default position based on foot progress
+        if torch.any(transitioning_mask):
+            # Smooth transition to default position
+            left_transition_factor = 1.0 - left_foot_progress[transitioning_mask]
+            right_transition_factor = 1.0 - right_foot_progress[transitioning_mask]
+            
+            left_swing_deltas[transitioning_mask] *= left_transition_factor.unsqueeze(1)
+            right_swing_deltas[transitioning_mask] *= right_transition_factor.unsqueeze(1)
+        
+        # Set joint positions
+        self.ref_dof_pos[:, 0:6] = left_swing_deltas
+        self.ref_dof_pos[:, 6:12] = right_swing_deltas
 
-        self.ref_dof_pos[torch.abs(sin_pos) < 0.1] = 0.
+        # Original double support logic (but respect transition states)
+        double_support_mask = torch.abs(sin_pos) < 0.1
+        walking_double_support = double_support_mask & (self.gait_state == 0)
+        self.ref_dof_pos[walking_double_support] = 0.
+        
+        # V2.2: Standing robots always have zero deltas
+        self.ref_dof_pos[standing_mask] = 0.
         
         # if use_ref_actions=True, action += ref_action
         self.ref_action = 2 * self.ref_dof_pos
@@ -518,6 +671,11 @@ class X1DHStandEnv(LeggedRobot):
         # rand 0 or 0.5
         self.gait_start[env_ids] = torch.randint(0, 2, (len(env_ids),)).to(self.device)*0.5
         
+        # V2.2: Reset transition state variables
+        self.gait_state[env_ids] = 0  # Reset to WALKING
+        self.transition_timer[env_ids] = 0.0
+        self.previous_command_norm[env_ids] = 0.0
+        
         #resample command
         self.generate_gait_time(env_ids)
         self._resample_commands()
@@ -564,6 +722,15 @@ class X1DHStandEnv(LeggedRobot):
         self.phase_length_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long)
         self.gait_start = torch.randint(0, 2, (self.num_envs,)).to(self.device)*0.5
+        
+        # V2.2: Initialize transition state buffers 
+        # Note: These are also initialized in __init__, but we ensure they exist here
+        if not hasattr(self, 'gait_state'):
+            self.gait_state = torch.zeros(self.num_envs, device=self.device, dtype=torch.int32)
+        if not hasattr(self, 'transition_timer'):
+            self.transition_timer = torch.zeros(self.num_envs, device=self.device)
+        if not hasattr(self, 'previous_command_norm'):
+            self.previous_command_norm = torch.zeros(self.num_envs, device=self.device)
 
 # ================================================ Rewards ================================================== #
     def _reward_ref_joint_pos(self):
@@ -898,3 +1065,57 @@ class X1DHStandEnv(LeggedRobot):
     def _reward_dof_torque_limits(self):
         # penalize torques too close to the limit
         return torch.sum((torch.abs(self.torques) - self.torque_limits*self.cfg.rewards.soft_torque_limit).clip(min=0.), dim=1)
+    
+    def _reward_smooth_transition(self):
+        """V2.2: Reward smooth walk-to-stand transitions and coordinated foot behavior"""
+        reward = torch.zeros(self.num_envs, device=self.device)
+        
+        transitioning_mask = self.gait_state == 1
+        if not torch.any(transitioning_mask):
+            return reward
+            
+        # Get transition progress and foot coordination
+        transition_progress = self._get_transition_progress()
+        left_foot_progress, right_foot_progress = self._get_coordinated_foot_transition()
+        
+        # Reward coordinated foot landing (no simultaneous foot movements)
+        foot_progress_diff = torch.abs(left_foot_progress - right_foot_progress)
+        coordination_bonus = torch.exp(-foot_progress_diff * 5.0)  # Higher reward for coordinated timing
+        
+        # Reward stable transition progress (smooth, no oscillations)
+        transition_smoothness = 1.0 - torch.abs(transition_progress - 0.5) * 2.0  # Peak at 50% progress
+        
+        # Bonus for maintaining balance during transition
+        both_feet_stable = self._check_both_feet_stable()
+        balance_bonus = torch.where(both_feet_stable, 1.2, 0.8)
+        
+        # Combine rewards for transitioning environments
+        total_reward = (coordination_bonus + transition_smoothness) * balance_bonus
+        reward[transitioning_mask] = total_reward[transitioning_mask]
+        
+        return reward
+    
+    def _reward_foot_coordination_during_transition(self):
+        """V2.2: Penalize foot disturbances and simultaneous foot movements during transitions"""
+        penalty = torch.zeros(self.num_envs, device=self.device)
+        
+        transitioning_mask = self.gait_state == 1
+        if not torch.any(transitioning_mask):
+            return penalty
+            
+        # Get foot velocities
+        left_foot_vel = torch.norm(self.rigid_state[:, self.feet_indices[0], 7:10], dim=1)
+        right_foot_vel = torch.norm(self.rigid_state[:, self.feet_indices[1], 7:10], dim=1)
+        
+        # Penalize high foot velocities during transition (indicates disturbance)
+        foot_disturbance = (left_foot_vel + right_foot_vel) / 2.0
+        disturbance_penalty = torch.clamp(foot_disturbance - 0.5, 0.0, 2.0)  # Penalize > 0.5 m/s
+        
+        # Penalize simultaneous high velocities (both feet moving fast = poor coordination)
+        simultaneous_movement = torch.minimum(left_foot_vel, right_foot_vel)
+        coordination_penalty = torch.clamp(simultaneous_movement - 0.3, 0.0, 1.0)
+        
+        total_penalty = disturbance_penalty + coordination_penalty
+        penalty[transitioning_mask] = total_penalty[transitioning_mask]
+        
+        return penalty

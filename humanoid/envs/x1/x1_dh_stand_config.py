@@ -293,6 +293,13 @@ class X1DHStandCfg(LeggedRobotCfg):
         heading_command = False  # if true: compute ang vel command from heading error
         stand_com_threshold = 0.05 # if (lin_vel_x, lin_vel_y, ang_vel_yaw).norm < this, robot should stand
         sw_switch = True # use stand_com_threshold or not
+        
+        # V2.2: Enhanced transition control parameters
+        transition_duration = 1.0  # Duration for smooth walk-to-stand transition (seconds)
+        transition_smoothing = True  # Enable coordinated foot landing sequence
+        swing_foot_priority = True  # Swing foot lands first during transition
+        foot_landing_delay = 0.5  # Delay factor between swing and stance foot (0-1)
+        balance_check_required = True  # Require both feet stable before completing transition
 
         class ranges:
             lin_vel_x = [-0.4, 1.2] # min max [m/s] 
@@ -354,6 +361,9 @@ class X1DHStandCfg(LeggedRobotCfg):
             dof_vel_limits = -1
             dof_pos_limits = -10.
             dof_torque_limits = -0.1
+            # V2.2: Transition rewards
+            smooth_transition = 1.0
+            foot_coordination_during_transition = -0.5
 
     class normalization:
         class obs_scales:
