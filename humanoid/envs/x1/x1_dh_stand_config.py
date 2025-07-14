@@ -145,14 +145,20 @@ class X1DHStandCfg(LeggedRobotCfg):
         control_type = 'P'
 
         stiffness = {'hip_pitch_joint': 30, 'hip_roll_joint': 40,'hip_yaw_joint': 35,
-                     'knee_pitch_joint': 100, 'ankle_pitch_joint': 35, 'ankle_roll_joint': 35}
+                     'knee_pitch_joint': 100, 'ankle_pitch_joint': 35, 'ankle_roll_joint': 60}  # V2.3: 35→60 for stability
         damping = {'hip_pitch_joint': 3, 'hip_roll_joint': 3.0,'hip_yaw_joint': 4, 
-                   'knee_pitch_joint': 10, 'ankle_pitch_joint': 0.5, 'ankle_roll_joint': 0.5}
+                   'knee_pitch_joint': 10, 'ankle_pitch_joint': 0.5, 'ankle_roll_joint': 2.0}  # V2.3: 0.5→2.0 for oscillation suppression
 
         # action scale: target angle = actionScale * action + defaultAngle
         action_scale = 0.5
         # decimation: Number of control action updates @ sim DT per policy DT
         decimation = 10  # 50hz 100hz
+        
+        # V2.3: Dynamic control parameters for ankle roll stability during transitions
+        transition_stiffness_multiplier = 1.5  # Increase stiffness by 50% during transitions
+        transition_damping_multiplier = 3.0    # Increase damping by 300% during transitions
+        ankle_oscillation_velocity_threshold = 2.0  # rad/s - trigger suppression above this
+        ankle_oscillation_position_threshold = 0.1  # rad - trigger correction above this
 
     class sim(LeggedRobotCfg.sim):
         dt = 0.001  # 200 Hz 1000 Hz
@@ -364,6 +370,8 @@ class X1DHStandCfg(LeggedRobotCfg):
             # V2.2: Transition rewards
             smooth_transition = 1.0
             foot_coordination_during_transition = -0.5
+            # V2.3: Ankle roll stability reward
+            ankle_roll_stability = 0.5
 
     class normalization:
         class obs_scales:

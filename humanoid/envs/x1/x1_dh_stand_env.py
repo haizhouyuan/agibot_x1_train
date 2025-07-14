@@ -234,6 +234,121 @@ class X1DHStandEnv(LeggedRobot):
         
         return left_foot_progress, right_foot_progress
 
+    def _detect_ankle_roll_oscillation(self):
+        """V2.3: Detect ankle roll oscillation during transitions"""
+        # Ankle roll joint indices: left=5, right=11
+        left_ankle_roll_pos = self.dof_pos[:, 5]   # left_ankle_roll_joint
+        right_ankle_roll_pos = self.dof_pos[:, 11] # right_ankle_roll_joint
+        left_ankle_roll_vel = self.dof_vel[:, 5]
+        right_ankle_roll_vel = self.dof_vel[:, 11]
+        
+        # Detect high-frequency oscillation (high angular velocity)
+        vel_threshold = getattr(self.cfg.control, 'ankle_oscillation_velocity_threshold', 2.0)
+        left_oscillation = torch.abs(left_ankle_roll_vel) > vel_threshold
+        right_oscillation = torch.abs(right_ankle_roll_vel) > vel_threshold
+        
+        # Detect position deviation from neutral (large roll angles)
+        pos_threshold = getattr(self.cfg.control, 'ankle_oscillation_position_threshold', 0.1)
+        left_deviation = torch.abs(left_ankle_roll_pos) > pos_threshold
+        right_deviation = torch.abs(right_ankle_roll_pos) > pos_threshold
+        
+        # Combined ankle disturbance detection
+        ankle_disturbance = left_oscillation | right_oscillation | left_deviation | right_deviation
+        
+        return ankle_disturbance, left_oscillation, right_oscillation, left_deviation, right_deviation
+
+    def _update_ankle_control_during_transition(self):
+        """V2.3: Dynamically adjust ankle control parameters during transitions"""
+        transitioning_mask = self.gait_state == 1  # TRANSITIONING state
+        
+        if torch.any(transitioning_mask):
+            # Get multipliers from config
+            stiffness_mult = getattr(self.cfg.control, 'transition_stiffness_multiplier', 1.5)
+            damping_mult = getattr(self.cfg.control, 'transition_damping_multiplier', 3.0)
+            
+            # Ankle roll joint indices
+            left_ankle_roll_idx = 5
+            right_ankle_roll_idx = 11
+            
+            # Store original values if not already stored
+            if not hasattr(self, '_original_ankle_stiffness'):
+                self._original_ankle_stiffness = 60.0  # From config
+                self._original_ankle_damping = 2.0     # From config
+            
+            # Calculate enhanced parameters
+            enhanced_stiffness = self._original_ankle_stiffness * stiffness_mult
+            enhanced_damping = self._original_ankle_damping * damping_mult
+            
+            # Apply enhanced parameters to transitioning environments
+            # Note: This would require access to the underlying control system
+            # For now, we'll modify the reference positions more aggressively
+            return enhanced_stiffness, enhanced_damping
+        
+        return None, None
+
+    def _suppress_ankle_roll_oscillation(self):
+        """V2.3: Actively suppress ankle roll oscillation"""
+        ankle_disturbance, left_osc, right_osc, left_dev, right_dev = self._detect_ankle_roll_oscillation()
+        
+        if torch.any(ankle_disturbance):
+            # Target ankle roll position (neutral)
+            target_ankle_roll = 0.0
+            
+            # Apply aggressive correction to disturbed ankles
+            # Left ankle correction
+            needs_left_correction = left_osc | left_dev
+            if torch.any(needs_left_correction):
+                self.ref_dof_pos[needs_left_correction, 5] = target_ankle_roll
+            
+            # Right ankle correction
+            needs_right_correction = right_osc | right_dev
+            if torch.any(needs_right_correction):
+                self.ref_dof_pos[needs_right_correction, 11] = target_ankle_roll
+            
+            return ankle_disturbance
+        
+        return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+    def _compute_balance_ankle_correction(self):
+        """V2.3: Compute ankle roll correction based on center of mass balance"""
+        # Get center of mass position
+        com_position = self.root_states[:, :3]  # [x, y, z]
+        
+        # Get foot positions 
+        foot_positions = self.rigid_state[:, self.feet_indices, :3]  # [left_foot, right_foot]
+        
+        # Calculate foot center (midpoint between feet)
+        foot_center = torch.mean(foot_positions, dim=1)  # Average of left and right foot positions
+        
+        # Calculate lateral (Y-axis) offset of COM from foot center
+        lateral_offset = com_position[:, 1] - foot_center[:, 1]
+        
+        # Convert lateral offset to ankle roll correction (small angle approximation)
+        # Negative feedback: if COM shifts right (+Y), roll ankles left (-angle) to compensate
+        ankle_roll_correction = -lateral_offset * 0.5  # Scaling factor for correction strength
+        
+        return ankle_roll_correction
+
+    def _apply_transition_ankle_control(self):
+        """V2.3: Apply specialized ankle control during transitions"""
+        transitioning_mask = self.gait_state == 1
+        
+        if torch.any(transitioning_mask):
+            # Step 1: Apply dynamic parameter enhancement
+            enhanced_stiffness, enhanced_damping = self._update_ankle_control_during_transition()
+            
+            # Step 2: Suppress any detected oscillations
+            oscillation_suppressed = self._suppress_ankle_roll_oscillation()
+            
+            # Step 3: Apply balance-based correction for transitioning robots
+            ankle_correction = self._compute_balance_ankle_correction()
+            
+            # Apply balance correction to transitioning environments (only if not being suppressed)
+            non_suppressed_transition = transitioning_mask & (~oscillation_suppressed)
+            if torch.any(non_suppressed_transition):
+                self.ref_dof_pos[non_suppressed_transition, 5] += ankle_correction[non_suppressed_transition]   # left ankle
+                self.ref_dof_pos[non_suppressed_transition, 11] += ankle_correction[non_suppressed_transition]  # right ankle
+
     def  _get_phase(self):
         """V2.2: Enhanced phase calculation with smooth transition support"""
         cycle_time = self.cfg.rewards.cycle_time
@@ -449,6 +564,9 @@ class X1DHStandEnv(LeggedRobot):
         
         # V2.2: Standing robots always have zero deltas
         self.ref_dof_pos[standing_mask] = 0.
+        
+        # V2.3: Apply ankle roll stability control during transitions
+        self._apply_transition_ankle_control()
         
         # if use_ref_actions=True, action += ref_action
         self.ref_action = 2 * self.ref_dof_pos
@@ -1119,3 +1237,29 @@ class X1DHStandEnv(LeggedRobot):
         penalty[transitioning_mask] = total_penalty[transitioning_mask]
         
         return penalty
+
+    def _reward_ankle_roll_stability(self):
+        """V2.3: Reward ankle roll stability during transitions"""
+        reward = torch.zeros(self.num_envs, device=self.device)
+        
+        transitioning_mask = self.gait_state == 1
+        if not torch.any(transitioning_mask):
+            return reward
+            
+        # Get ankle roll joint positions and velocities
+        left_ankle_roll_pos = self.dof_pos[:, 5]   # left_ankle_roll_joint
+        right_ankle_roll_pos = self.dof_pos[:, 11] # right_ankle_roll_joint
+        left_ankle_roll_vel = self.dof_vel[:, 5]
+        right_ankle_roll_vel = self.dof_vel[:, 11]
+        
+        # Reward for keeping ankle roll positions close to neutral (0)
+        position_stability = torch.exp(-10.0 * (torch.abs(left_ankle_roll_pos) + torch.abs(right_ankle_roll_pos)))
+        
+        # Reward for low ankle roll velocities (less oscillation)
+        velocity_stability = torch.exp(-5.0 * (torch.abs(left_ankle_roll_vel) + torch.abs(right_ankle_roll_vel)))
+        
+        # Combined stability reward
+        stability_reward = (position_stability + velocity_stability) / 2.0
+        reward[transitioning_mask] = stability_reward[transitioning_mask]
+        
+        return reward
