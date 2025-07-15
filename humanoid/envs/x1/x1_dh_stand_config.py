@@ -145,9 +145,9 @@ class X1DHStandCfg(LeggedRobotCfg):
         control_type = 'P'
 
         stiffness = {'hip_pitch_joint': 30, 'hip_roll_joint': 40,'hip_yaw_joint': 35,
-                     'knee_pitch_joint': 100, 'ankle_pitch_joint': 35, 'ankle_roll_joint': 60}  # V2.3: 35→60 for stability
+                     'knee_pitch_joint': 100, 'ankle_pitch_joint': 35, 'ankle_roll_joint': 35}  # V2.12: 60→35 for light gait
         damping = {'hip_pitch_joint': 3, 'hip_roll_joint': 3.0,'hip_yaw_joint': 4, 
-                   'knee_pitch_joint': 10, 'ankle_pitch_joint': 0.5, 'ankle_roll_joint': 2.0}  # V2.3: 0.5→2.0 for oscillation suppression
+                   'knee_pitch_joint': 10, 'ankle_pitch_joint': 0.5, 'ankle_roll_joint': 3.5}  # V2.12: 2.0→3.5 for light gait damping
 
         # action scale: target angle = actionScale * action + defaultAngle
         action_scale = 0.5
@@ -309,7 +309,7 @@ class X1DHStandCfg(LeggedRobotCfg):
 
         class ranges:
             # V2.5: 扩展命令范围以包含更多过渡状态触发条件
-            lin_vel_x = [-0.3, 1.0] # min max [m/s] - 包含更多接近0的值
+            lin_vel_x = [-0.3, 0.6] # min max [m/s] - V2.11: 降低最大速度从1.0到0.6，解决行走过快问题
             lin_vel_y = [-0.3, 0.3]   # min max [m/s] - 包含更多接近0的值
             ang_vel_yaw = [-0.4, 0.4]    # min max [rad/s] - 包含更多接近0的值
             heading = [-3.14, 3.14]
@@ -344,12 +344,12 @@ class X1DHStandCfg(LeggedRobotCfg):
             feet_distance = 0.2
             knee_distance = 0.2
             # contact 
-            feet_contact_forces = -0.01
-            # vel tracking
-            tracking_lin_vel = 1.8
+            feet_contact_forces = -0.003  # V2.12: 从-0.01降低到-0.003（70%减少），避免过度惩罚，实现轻盈步态
+            # vel tracking - V2.11: 调整速度相关奖励权重
+            tracking_lin_vel = 1.2  # 从1.8降低到1.2，减少对高速的追求
             tracking_ang_vel = 1.1
             vel_mismatch_exp = 0.5  # lin_z; ang x,y
-            low_speed = 0.2
+            low_speed = 0.5  # 从0.2提高到0.5，增强速度控制
             track_vel_hard = 0.5
             # base pos
             default_joint_pos = 1.0
@@ -358,7 +358,7 @@ class X1DHStandCfg(LeggedRobotCfg):
             base_height = 0.2
             base_acc = 0.2
             # energy
-            action_smoothness = -0.002
+            action_smoothness = -0.005  # V2.12: 从-0.002增强到-0.005，提高动作平滑性约束
             torques = -8e-9
             dof_vel = -2e-8
             dof_acc = -1e-7
@@ -373,6 +373,11 @@ class X1DHStandCfg(LeggedRobotCfg):
             foot_coordination_during_transition = -0.5
             # V2.3: Ankle roll stability reward
             ankle_roll_stability = 0.5
+            # V2.11: 速度限制奖励
+            speed_limit = 0.8
+            # V2.12: 轻盈步态奖励
+            soft_landing = 0.3
+            vertical_speed_control = 0.2
 
     class normalization:
         class obs_scales:

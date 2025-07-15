@@ -1097,7 +1097,7 @@ class X1DHStandEnv(LeggedRobot):
 
         # Define speed criteria for desired range
         speed_too_low = absolute_speed < 0.5 * absolute_command
-        speed_too_high = absolute_speed > 1.2 * absolute_command
+        speed_too_high = absolute_speed > 1.1 * absolute_command  # V2.11: 从1.2降为1.1，更严格的速度控制
         speed_desired = ~(speed_too_low | speed_too_high)
 
         # Check if the speed and command directions are mismatched
@@ -1110,8 +1110,8 @@ class X1DHStandEnv(LeggedRobot):
         # Assign rewards based on conditions
         # Speed too low
         reward[speed_too_low] = -1.0
-        # Speed too high
-        reward[speed_too_high] = 0.
+        # Speed too high - V2.11: 增加过速惩罚，从0.改为-0.8
+        reward[speed_too_high] = -0.8
         # Speed within desired range
         reward[speed_desired] = 1.2
         # Sign mismatch has the highest priority
@@ -1287,5 +1287,117 @@ class X1DHStandEnv(LeggedRobot):
         transitioning_mask = self.gait_state == 1
         reward = stability_reward * 0.2  # 基础奖励
         reward[transitioning_mask] = stability_reward[transitioning_mask] * 1.0  # 过渡状态全额奖励
+        
+        return reward
+
+    def _reward_speed_limit(self):
+        """
+        V2.11: 独立的速度限制奖励，防止过快移动
+        对超过安全速度上限的情况施加额外惩罚
+        """
+        max_safe_speed = 0.7  # m/s 安全速度上限
+        current_speed = torch.norm(self.base_lin_vel[:, :2], dim=1)
+        
+        # 超过安全速度时施加惩罚
+        speed_penalty = torch.where(
+            current_speed > max_safe_speed,
+            -2.0 * (current_speed - max_safe_speed),  # 超速惩罚，与超速量成正比
+            0.0
+        )
+        
+        return speed_penalty
+
+    def _reward_soft_landing(self):
+        """
+        V2.12: 软着陆奖励函数，鼓励平缓着地，惩罚冲击性着地
+        基于足部接触力变化率来评估着地质量，实现轻盈步态
+        """
+        # 获取当前足部接触力
+        current_contact_forces = torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1)
+        
+        # 初始化上一步接触力（如果还没有记录）
+        if not hasattr(self, 'last_contact_forces'):
+            self.last_contact_forces = torch.zeros_like(current_contact_forces)
+        
+        # 计算接触力变化率
+        contact_force_change = current_contact_forces - self.last_contact_forces
+        
+        # 对每只脚计算软着陆奖励
+        soft_landing_reward = torch.zeros(self.num_envs, device=self.device)
+        
+        for foot_idx in range(len(self.feet_indices)):
+            force_change = contact_force_change[:, foot_idx]
+            current_force = current_contact_forces[:, foot_idx]
+            
+            # 检测着地瞬间（接触力从低到高的变化）
+            landing_mask = (current_force > 10.0) & (force_change > 0.0)
+            
+            # 计算着地质量奖励
+            if torch.any(landing_mask):
+                # 平缓着地：力变化小 -> 正奖励
+                gentle_landing = torch.exp(-force_change * 0.01)
+                
+                # 冲击着地：力变化大 -> 负奖励
+                impact_penalty = torch.where(
+                    force_change > 50.0,  # 接触力变化超过50N视为冲击
+                    -0.5 * (force_change - 50.0) * 0.01,
+                    0.0
+                )
+                
+                # 综合奖励
+                foot_reward = gentle_landing + impact_penalty
+                soft_landing_reward += foot_reward * landing_mask.float()
+        
+        # 更新上一步接触力
+        self.last_contact_forces = current_contact_forces.clone()
+        
+        return soft_landing_reward
+
+    def _reward_vertical_speed_control(self):
+        """
+        V2.12: 垂直速度控制奖励，鼓励轻柔的抬脚和落脚动作
+        控制足部垂直速度，避免过快下落导致冲击
+        """
+        # 获取足部垂直速度
+        feet_vertical_vel = self.rigid_state[:, self.feet_indices, 9]  # z方向速度
+        
+        # 获取足部高度
+        feet_height = self.rigid_state[:, self.feet_indices, 2]
+        ground_height = 0.0  # 假设地面高度为0
+        
+        reward = torch.zeros(self.num_envs, device=self.device)
+        
+        for foot_idx in range(len(self.feet_indices)):
+            foot_height = feet_height[:, foot_idx]
+            foot_vel_z = feet_vertical_vel[:, foot_idx]
+            
+            # 检测接近地面的足部（高度小于0.1m）
+            near_ground = foot_height < 0.1
+            
+            # 检测下降的足部（垂直速度为负）
+            falling = foot_vel_z < 0.0
+            
+            # 对接近地面且下降的足部施加速度控制
+            control_mask = near_ground & falling
+            
+            if torch.any(control_mask):
+                # 理想的着地速度：接近地面时应该减速
+                # 高度越低，期望速度越小
+                ideal_speed = -0.5 * foot_height[control_mask]  # 负值表示向下
+                actual_speed = foot_vel_z[control_mask]
+                
+                # 如果实际速度过快（更负），给予惩罚
+                speed_error = torch.abs(actual_speed - ideal_speed)
+                speed_reward = torch.exp(-speed_error * 10.0)  # 速度越接近理想值，奖励越高
+                
+                # 对速度过快的情况额外惩罚
+                too_fast_penalty = torch.where(
+                    actual_speed < -0.8,  # 下降速度超过0.8m/s
+                    -0.5 * torch.abs(actual_speed + 0.8),
+                    0.0
+                )
+                
+                foot_reward = speed_reward + too_fast_penalty
+                reward[control_mask] += foot_reward
         
         return reward

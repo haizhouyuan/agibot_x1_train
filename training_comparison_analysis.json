@@ -1,0 +1,67 @@
+{
+  "timestamp": "2025-07-15T19:56:22.235687",
+  "v210_metrics": {
+    "eta": 5326.2,
+    "rewards": {}
+  },
+  "v211_metrics": {
+    "current_iteration": 9402,
+    "total_iterations": 20000,
+    "mean_reward": 153.73,
+    "mean_episode_length": 2208.3,
+    "total_timesteps": 924254208,
+    "total_time": 19131.64,
+    "eta": 21567.4,
+    "rewards": {
+      "rew_feet_distance": 0.1929,
+      "rew_feet_rotation": 0.0,
+      "rew_foot_slip": -0.1307,
+      "rew_knee_distance": 0.1772,
+      "rew_low_speed": 0.0384,
+      "rew_orientation": 0.523,
+      "rew_ref_joint_pos": 1.1346,
+      "rew_stand_still": 0.4649,
+      "rew_torques": -0.0,
+      "rew_track_vel_hard": 0.0905,
+      "rew_tracking_ang_vel": 0.7866,
+      "rew_tracking_lin_vel": 1.0402,
+      "rew_vel_mismatch_exp": 0.2822,
+      "rew_action_smoothness": -0.0087,
+      "rew_base_acc": 0.1122,
+      "rew_base_height": 0.1166,
+      "rew_collision": -0.0,
+      "rew_default_joint_pos": 0.0618,
+      "rew_dof_acc": -0.0166,
+      "rew_dof_pos_limits": -0.0001,
+      "rew_dof_torque_limits": -0.0007,
+      "rew_dof_vel": -0.0,
+      "rew_dof_vel_limits": -0.0201,
+      "rew_feet_air_time": 0.0078,
+      "rew_feet_clearance": 0.3032,
+      "rew_feet_contact_forces": -0.0671,
+      "rew_feet_contact_number": 1.7291
+    }
+  },
+  "comparison": {
+    "rew_tracking_lin_vel": {
+      "v210": 0,
+      "v211": 1.0402,
+      "change": "new"
+    },
+    "rew_tracking_ang_vel": {
+      "v210": 0,
+      "v211": 0.7866,
+      "change": "new"
+    },
+    "rew_low_speed": {
+      "v210": 0,
+      "v211": 0.0384,
+      "change": "new"
+    },
+    "rew_track_vel_hard": {
+      "v210": 0,
+      "v211": 0.0905,
+      "change": "new"
+    }
+  }
+}
