@@ -149,7 +149,7 @@ class X1DHStandEnv(LeggedRobot):
             self.sim, gymtorch.unwrap_tensor(self.root_states))
 
     def _update_gait_state(self):
-        """V2.2: Update gait state for smooth walk-to-stand transitions"""
+        """V2.5: Update gait state for smooth walk-to-stand transitions with better triggering"""
         current_command_norm = torch.norm(self.commands[:, :3], dim=1)
         stand_command = current_command_norm <= self.cfg.commands.stand_com_threshold
         walk_command = current_command_norm > self.cfg.commands.stand_com_threshold
@@ -178,6 +178,11 @@ class X1DHStandEnv(LeggedRobot):
         both_feet_contact = self._check_both_feet_stable()
         complete_transition = transition_complete & both_feet_contact
         self.gait_state[complete_transition] = 2  # STANDING
+        
+        # V2.5: 添加gait_state分布调试输出
+        if self.common_step_counter % 100 == 0:  # 每100步输出一次
+            gait_counts = torch.bincount(self.gait_state, minlength=3)
+            print(f"[DEBUG] Step {self.common_step_counter}: Gait state distribution - WALKING: {gait_counts[0]}, TRANSITIONING: {gait_counts[1]}, STANDING: {gait_counts[2]}")
         
         self.previous_command_norm = current_command_norm.clone()
 
@@ -801,8 +806,24 @@ class X1DHStandEnv(LeggedRobot):
         # fill extras
         self.extras["episode"] = {}
         for key in self.episode_sums.keys():
-            self.extras["episode"]['rew_' + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
+            # V2.9 Fix: 修复子类方法重写冲突，强制显示所有奖励
+            reward_value = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
+            self.extras["episode"]['rew_' + key] = reward_value
             self.episode_sums[key][env_ids] = 0.
+            
+            # V2.9: 强制调试输出踝关节相关奖励
+            if key in ['ankle_roll_stability', 'foot_coordination_during_transition', 'smooth_transition']:
+                print(f"[V2.9 DEBUG] {key}: {reward_value.item():.6f}")
+            
+        # V2.9: 输出episode_sums统计信息
+        if len(env_ids) > 0:  # 只在有环境重置时输出
+            all_keys = list(self.episode_sums.keys())
+            print(f"[V2.9 INFO] Total rewards in episode_sums: {len(all_keys)}")
+            ankle_keys = [k for k in all_keys if 'ankle' in k or 'transition' in k or 'smooth' in k]
+            if ankle_keys:
+                print(f"[V2.9 INFO] Ankle-related rewards found: {ankle_keys}")
+            else:
+                print(f"[V2.9 WARNING] No ankle-related rewards in episode_sums")
         # log additional curriculum info
         if self.cfg.terrain.mesh_type == "trimesh":
             self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
@@ -1239,13 +1260,14 @@ class X1DHStandEnv(LeggedRobot):
         return penalty
 
     def _reward_ankle_roll_stability(self):
-        """V2.3: Reward ankle roll stability during transitions"""
-        reward = torch.zeros(self.num_envs, device=self.device)
+        """V2.9: 踝关节稳定性奖励 - 添加函数调用验证"""
+        # V2.9: 验证函数被调用
+        if hasattr(self, '_ankle_debug_counter'):
+            self._ankle_debug_counter += 1
+        else:
+            self._ankle_debug_counter = 1
+            print(f"[V2.9 VERIFY] _reward_ankle_roll_stability function called! Counter: {self._ankle_debug_counter}")
         
-        transitioning_mask = self.gait_state == 1
-        if not torch.any(transitioning_mask):
-            return reward
-            
         # Get ankle roll joint positions and velocities
         left_ankle_roll_pos = self.dof_pos[:, 5]   # left_ankle_roll_joint
         right_ankle_roll_pos = self.dof_pos[:, 11] # right_ankle_roll_joint
@@ -1260,6 +1282,10 @@ class X1DHStandEnv(LeggedRobot):
         
         # Combined stability reward
         stability_reward = (position_stability + velocity_stability) / 2.0
-        reward[transitioning_mask] = stability_reward[transitioning_mask]
+        
+        # V2.8: 始终给予基础奖励，过渡状态时给额外奖励
+        transitioning_mask = self.gait_state == 1
+        reward = stability_reward * 0.2  # 基础奖励
+        reward[transitioning_mask] = stability_reward[transitioning_mask] * 1.0  # 过渡状态全额奖励
         
         return reward

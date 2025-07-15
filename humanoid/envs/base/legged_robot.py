@@ -42,6 +42,9 @@ import torch
 from humanoid import LEGGED_GYM_ROOT_DIR
 from humanoid.envs.base.base_task import BaseTask
 # from humanoid.utils.terrain import Terrain
+
+# V2.9: Module import verification
+print("[V2.9 MODULE] legged_robot.py module imported with reward registration fixes")
 from humanoid.utils.math import quat_apply_yaw, wrap_to_pi, torch_rand_sqrt_float
 from humanoid.utils.helpers import class_to_dict
 from .legged_robot_config import LeggedRobotCfg
@@ -266,8 +269,14 @@ class LeggedRobot(BaseTask):
         # fill extras
         self.extras["episode"] = {}
         for key in self.episode_sums.keys():
-            self.extras["episode"]['rew_' + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
+            # V2.4 Fix: 强制显示所有奖励，包括值为0的
+            reward_value = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
+            self.extras["episode"]['rew_' + key] = reward_value
             self.episode_sums[key][env_ids] = 0.
+            
+            # 调试输出踝关节相关奖励
+            if key in ['ankle_roll_stability', 'foot_coordination_during_transition', 'smooth_transition']:
+                print(f"DEBUG {key}: {reward_value.item():.6f}")
         # log additional curriculum info
         if self.cfg.terrain.mesh_type == "trimesh":
             self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
@@ -986,12 +995,27 @@ class LeggedRobot(BaseTask):
         # prepare list of functions
         self.reward_functions = []
         self.reward_names = []
+        
+        # V2.9: Debug reward registration process
+        print(f"[V2.9 REGISTER] Starting reward registration with {len(self.reward_scales)} reward scales")
+        ankle_related = [k for k in self.reward_scales.keys() if 'ankle' in k or 'transition' in k or 'smooth' in k]
+        print(f"[V2.9 REGISTER] Ankle-related rewards in reward_scales: {ankle_related}")
+        
         for name, scale in self.reward_scales.items():
             if name=="termination":
                 continue
             self.reward_names.append(name)
-            name = '_reward_' + name
-            self.reward_functions.append(getattr(self, name))
+            method_name = '_reward_' + name
+            try:
+                method = getattr(self, method_name)
+                self.reward_functions.append(method)
+                if 'ankle' in name or 'transition' in name or 'smooth' in name:
+                    print(f"[V2.9 REGISTER] Successfully registered: {name} -> {method_name}")
+            except AttributeError as e:
+                print(f"[V2.9 ERROR] Failed to register {name}: {e}")
+
+        print(f"[V2.9 REGISTER] Total registered functions: {len(self.reward_functions)}")
+        print(f"[V2.9 REGISTER] Registered names: {self.reward_names}")
 
         # reward episode sums
         self.episode_sums = {name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)

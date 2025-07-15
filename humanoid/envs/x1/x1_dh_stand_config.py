@@ -297,7 +297,7 @@ class X1DHStandCfg(LeggedRobotCfg):
                            "walk_omnidirectional": [4,6]}
 
         heading_command = False  # if true: compute ang vel command from heading error
-        stand_com_threshold = 0.05 # if (lin_vel_x, lin_vel_y, ang_vel_yaw).norm < this, robot should stand
+        stand_com_threshold = 0.15 # V2.5: 提高阈值以增加过渡状态触发概率
         sw_switch = True # use stand_com_threshold or not
         
         # V2.2: Enhanced transition control parameters
@@ -308,12 +308,13 @@ class X1DHStandCfg(LeggedRobotCfg):
         balance_check_required = True  # Require both feet stable before completing transition
 
         class ranges:
-            lin_vel_x = [-0.4, 1.2] # min max [m/s] 
-            lin_vel_y = [-0.4, 0.4]   # min max [m/s]
-            ang_vel_yaw = [-0.6, 0.6]    # min max [rad/s]
+            # V2.5: 扩展命令范围以包含更多过渡状态触发条件
+            lin_vel_x = [-0.3, 1.0] # min max [m/s] - 包含更多接近0的值
+            lin_vel_y = [-0.3, 0.3]   # min max [m/s] - 包含更多接近0的值
+            ang_vel_yaw = [-0.4, 0.4]    # min max [rad/s] - 包含更多接近0的值
             heading = [-3.14, 3.14]
 
-    class rewards:
+    class rewards(LeggedRobotCfg.rewards):
         soft_dof_pos_limit = 0.98
         soft_dof_vel_limit = 0.9
         soft_torque_limit = 0.9
@@ -333,7 +334,7 @@ class X1DHStandCfg(LeggedRobotCfg):
         tracking_sigma = 5 
         max_contact_force = 700  # forces above this value are penalized
         
-        class scales:
+        class scales(LeggedRobotCfg.rewards.scales):
             ref_joint_pos = 2.2
             feet_clearance = 1.
             feet_contact_number = 2.0
